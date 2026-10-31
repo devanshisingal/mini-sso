@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_LIFETIME_SECONDS: int = 900  # 15 minutes
     ID_TOKEN_LIFETIME_SECONDS: int = 3600  # 1 hour
 
+    # Security & Admin Policy
+    ADMIN_EMAIL: str = "admin@example.com"
+    ALLOW_OPEN_REGISTRATION: bool = True
+
     # CORS
     CORS_ALLOWED_ORIGINS: list[str] = [
         "http://localhost:3000",

@@ -99,9 +99,14 @@ def register(
             detail="Email is already registered",
         )
 
-    # First registered user becomes admin automatically for convenience
-    user_count = len(db.scalars(select(User)).all())
-    is_admin = user_count == 0
+    if not settings.ALLOW_OPEN_REGISTRATION:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Open registration is disabled",
+        )
+
+    # Prevent first-user takeover: admin role granted only to designated ADMIN_EMAIL
+    is_admin = (req.email.lower() == settings.ADMIN_EMAIL.lower())
 
     user = User(
         email=req.email.lower(),

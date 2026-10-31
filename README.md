@@ -1,9 +1,31 @@
 # Mini SSO Login Service
 
-A lightweight, standards-compliant OpenID Connect (OIDC) Identity Provider and Single Sign-On (SSO) service with Time-Based One-Time Password (TOTP) two-factor authentication (2FA), paired with a modern React relying party demonstration application. Built to practice core engineering competencies emphasized in the HENNGE Full-Stack Pathway: API design, cryptographic primitives and authentication security, state management, testing discipline, containerized workflows, and cloud deployment. Start the entire system—PostgreSQL database, FastAPI identity provider, React IdP portal, and React demo client—with a single command: `docker compose up --build`.
+[![Mini SSO CI/CD](https://github.com/devanshisingal/mini-sso/actions/workflows/ci.yml/badge.svg)](https://github.com/devanshisingal/mini-sso/actions/workflows/ci.yml)
+
+A lightweight OpenID Connect (OIDC) Identity Provider and Single Sign-On (SSO) service with Time-Based One-Time Password (TOTP) two-factor authentication (2FA), paired with a React relying party demonstration application. Built to practice core engineering competencies emphasized in the HENNGE Full-Stack Pathway: API design, cryptographic primitives and authentication security basics, front-end state management, testing discipline, containerized workflows, and cloud deployment. Start the entire system—PostgreSQL database, FastAPI identity provider, React IdP portal, and React demo client—with a single command: `docker compose up --build`.
 
 > [!NOTE]
-> **Educational Project Notice**: This is an educational implementation developed to demonstrate deep first-principles understanding of OpenID Connect, PKCE, RFC 6238 TOTP, and authentication security. It is not intended for production workloads without further operational infrastructure and organizational hardening.
+> **Educational Project Notice**: This is an educational implementation developed to explore authentication, authorization, and security fundamentals. It implements a subset of OpenID Connect and is not production-ready or certified.
+
+---
+
+## What It Implements
+
+This project implements a subset of the OpenID Connect Core 1.0 and OAuth 2.0 specifications:
+- **Authorization Code Flow with PKCE (S256 only)**
+- **Discovery Endpoint**: `GET /.well-known/openid-configuration`
+- **JWKS Endpoint**: `GET /.well-known/jwks.json`
+- **UserInfo Endpoint**: `GET /userinfo` (Bearer token authentication)
+- **Second-Factor TOTP**: RFC 6238 implementation using standard library `hmac` and `hashlib` with dynamic truncation and anti-replay protection.
+- **Admin Management & Audit Trail**: Client registration and sign-in audit log.
+
+### What Is Not Supported
+- Implicit Flow and Hybrid Flow (deprecated for security)
+- Client Secrets for public clients (PKCE is strictly enforced instead)
+- Dynamic Client Registration (RFC 7591)
+- User Consent Screen (designed for first-party enterprise SSO where access is pre-granted)
+- Automated Key Rollover (supported via `kid` lookups, but rollover scheduling is manual)
+- Account Recovery / Password Reset via email
 
 ---
 
@@ -45,8 +67,6 @@ flowchart TD
 
 ## Authentication & Authorization Flow
 
-The diagram below details the OpenID Connect Authorization Code Flow with PKCE (S256) and TOTP second-factor verification:
-
 ```mermaid
 sequenceDiagram
     autonumber
@@ -69,7 +89,7 @@ sequenceDiagram
     UI->>User: Renders TOTP 6-digit challenge screen
     User->>UI: Enters 6-digit TOTP code
     UI->>API: POST /mfa/verify { code }
-    API->>API: Custom RFC 6238 verify with +-1 step drift & anti-replay check
+    API->>API: RFC 6238 verify with +-1 step drift & anti-replay check
     API->>DB: Update totp_credentials.last_used_step and session.mfa_verified_at
     API-->>UI: Response: { status: "success" }
     UI->>API: GET /authorize (with authenticated session cookie)
@@ -94,37 +114,58 @@ sequenceDiagram
 
 ## Security Decisions and Architectural Rationale
 
-Every security decision was chosen with specific defensive rationale:
-
 | Decision | Implementation | Security Rationale |
 | :--- | :--- | :--- |
-| **PKCE (S256 Only)** | Enforced in `app/core/pkce.py`; rejects `method=plain` and requires length 43–128. | In public single-page applications, client secrets cannot be securely stored. PKCE ensures that an intercepted authorization code cannot be redeemed without the browser-held high-entropy `code_verifier`. Rejection of `plain` protects against Downgrade Attacks. |
-| **Exact Redirect URI Matching** | Direct string equality against `client.redirect_uris` in database; no regex or wildcards. | Prevents Open Redirector vulnerabilities and parameter tampering where an attacker could coerce the IdP to redirect authorization codes to a third-party server. |
-| **Short-Lived, Hashed Codes** | Random 32-byte tokens hashed with SHA-256 before storage; 60-second expiration; `used_at` flag. | If database backups or query logs are ever leaked, stored authorization codes cannot be reversed. Immediate invalidation upon redemption stops code replay attacks. |
-| **Argon2id Password Hashing** | `argon2-cffi` configured with RFC 9106 interactive profile ($t=3, m=64\text{MB}, p=4$). | Argon2id is memory-hard and side-channel resistant, providing superior resistance against GPU and ASIC offline brute-force cracking compared to bcrypt or PBKDF2. |
-| **Custom RFC 6238 TOTP Engine** | Handcrafted dynamic truncation and counter pack using `hmac` and `hashlib`; tested against RFC 6238 test vectors. | Written from scratch to demonstrate complete mastery of the RFC 4226 / RFC 6238 standard rather than delegating to an opaque third-party library. |
-| **Replay Protection via `last_used_step`** | Database tracks the highest time step counter successfully used to authenticate. | Prevents a code from being replayed within the valid 30-second time window. Any attempt to reuse a code at the same or earlier counter step is rejected. |
-| **Clock Drift Window ($\pm 1$ step)** | Validates $[T-1, T, T+1]$ steps (30s tolerance window). | Balances user experience across client devices with slight clock synchronization offsets against window expansion risk. |
-| **TOTP Secrets Encrypted at Rest** | Authenticated symmetric encryption (`SecretCipher` using AES/Fernet with HKDF-derived keys). | Prevents exposure of user TOTP generator seeds if the SQL database or database dumps are compromised. |
-| **RS256 ID Token Signatures** | Asymmetric RSA key pairs (2048-bit) managed in database with unique `kid` and exposed via `/.well-known/jwks.json`. | Relying parties verify ID tokens using public keys without requiring shared secret access, preventing token forgery even if client applications are compromised. |
-| **Rate Limiting & Generic Errors** | Sliding-window limiter on failed credentials and TOTP attempts; uniform "Invalid email or password" messages. | Slows down automated credential stuffing and dictionary attacks while preventing user enumeration. |
-| **Client IP CIDR Allowlisting** | Optional `allowed_cidrs` per client application enforced during `/authorize`. | Mirrors HENNGE One's access control capabilities, restricting authorization requests to trusted organizational networks (e.g. corporate VPNs or branch offices). |
-| **Secure Session Cookies** | `HttpOnly`, `SameSite=Lax`, and `Secure` cookie attributes. | Mitigates Cross-Site Scripting (XSS) token extraction and Cross-Site Request Forgery (CSRF). |
-| **Tamper-Resistant Audit Trail** | Dedicated `audit_log` recording timestamp, event type, outcome, user ID, client ID, IP, and user-agent. | Provides full non-repudiation and forensic visibility into authentication successes, failures, and administrative configuration changes. |
+| **PKCE (S256 Only)** | [`pkce.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/core/pkce.py) | In public single-page applications, client secrets cannot be securely stored. PKCE ensures that an intercepted authorization code cannot be redeemed without the browser-held high-entropy `code_verifier`. Rejection of `plain` protects against Downgrade Attacks. |
+| **Exact Redirect URI Matching** | [`routes_oidc.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/api/routes_oidc.py) | Direct string equality against `client.redirect_uris` in database; no regex or wildcards. Prevents Open Redirector vulnerabilities and parameter tampering where an attacker could coerce the IdP to redirect authorization codes to an attacker-controlled endpoint. |
+| **Short-Lived, Hashed Codes** | [`routes_oidc.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/api/routes_oidc.py) | Random 32-byte tokens hashed with SHA-256 before storage; 60-second expiration; `used_at` flag. If database backups or query logs are ever leaked, stored authorization codes cannot be reversed. Invalidation upon redemption stops code replay attacks. |
+| **Argon2id Password Hashing** | [`security.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/core/security.py) | `argon2-cffi` configured with RFC 9106 interactive profile ($t=3, m=64\text{MB}, p=4$, salt 16 bytes, hash 32 bytes). Argon2id is memory-hard and side-channel resistant, providing superior resistance against GPU and ASIC offline brute-force cracking compared to bcrypt or PBKDF2. |
+| **Custom RFC 6238 TOTP Engine** | [`totp.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/core/totp.py) | TOTP implemented on `hmac` and `hashlib` following RFC 6238 and tested against its official test vectors. |
+| **Replay Protection via `last_used_step`** | [`totp.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/core/totp.py) | Database tracks the highest time step counter successfully used to authenticate. Prevents a code from being replayed within the valid 30-second time window. Any attempt to reuse a code at the same or earlier counter step is rejected. |
+| **Clock Drift Window ($\pm 1$ step)** | [`totp.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/core/totp.py) | Validates $[T-1, T, T+1]$ steps (30s tolerance window). Balances user experience across client devices with slight clock synchronization offsets against window expansion risk. |
+| **TOTP Secrets Encrypted at Rest** | [`security.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/core/security.py) | Authenticated symmetric encryption (`SecretCipher` using AES/Fernet with HKDF-derived keys). Prevents exposure of user TOTP seeds if the SQL database or backups are compromised. |
+| **RS256 ID Token Signatures** | [`jwt_service.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/core/jwt_service.py) | Asymmetric RSA key pairs (2048-bit) managed in database with unique `kid` and exposed via `/.well-known/jwks.json`. Relying parties verify ID tokens using public keys without requiring shared secret access. |
+| **Rate Limiting & Generic Errors** | [`rate_limiter.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/core/rate_limiter.py) | Sliding-window limiter on failed credentials (5 attempts / 5 min) and TOTP attempts (4 attempts / 3 min); uniform "Invalid email or password" messages to avoid user enumeration. |
+| **Client IP CIDR Allowlisting** | [`auth_service.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/services/auth_service.py) | Similar in idea to IP restriction in access control products such as HENNGE One. Restricts authorization requests to trusted organizational networks (e.g. corporate VPNs). |
+| **Secure Session Cookies** | [`routes_auth.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/api/routes_auth.py) | `HttpOnly`, `SameSite=Lax`, and `Secure` cookie attributes. Mitigates Cross-Site Scripting (XSS) token extraction and Cross-Site Request Forgery (CSRF). |
+| **Audit Log Trail** | [`audit_service.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/services/audit_service.py) | Audit log of sign-in events (not tamper-proof). Records timestamp, event type, outcome, user ID, client ID, IP, and user-agent. |
 
 ---
 
-## Data Model
+## Threat Model
 
-| Table | Primary Key | Key Columns | Purpose |
-| :--- | :--- | :--- | :--- |
-| `users` | `id` (UUID) | `email` (unique), `password_hash`, `is_admin`, `created_at` | Core user identity records |
-| `totp_credentials` | `user_id` (FK `users.id`) | `secret` (encrypted text), `confirmed_at`, `last_used_step` | TOTP secrets and anti-replay state |
-| `clients` | `id` (UUID) | `client_id` (unique), `name`, `redirect_uris` (JSON), `allowed_cidrs` (JSON) | Registered OIDC relying party applications |
-| `authorization_codes`| `code_hash` (SHA-256) | `client_id`, `user_id`, `redirect_uri`, `code_challenge`, `nonce`, `expires_at`, `used_at` | Ephemeral single-use authorization codes |
-| `sessions` | `id_hash` (SHA-256) | `user_id`, `mfa_verified_at`, `expires_at`, `ip`, `user_agent` | Browser sessions tied to HttpOnly cookies |
-| `signing_keys` | `kid` (UUID) | `private_key` (PEM), `public_key` (PEM), `active`, `created_at` | RSA key pairs for RS256 token signing and JWKS |
-| `audit_log` | `id` (Autoincrement) | `timestamp`, `user_id`, `client_id`, `event`, `outcome`, `ip`, `user_agent`, `details` | Complete sign-in and security audit trail |
+### What This System Defends Against
+1. **Credential Stuffing and Brute Force**:
+   - Argon2id computational memory hardness limits offline dictionary attacks.
+   - Sliding-window rate limiters block automated IP/email brute-force campaigns.
+   - Identical error messages prevent attackers from discovering which emails are registered.
+2. **Authorization Code Interception**:
+   - The authorization code is delivered via browser query parameters. PKCE S256 ensures an eavesdropper cannot exchange the code without the client's `code_verifier`.
+3. **Open Redirect Attacks**:
+   - Exact string comparison on `redirect_uri` prevents token leakage to malicious domains.
+4. **Code and Token Replay**:
+   - Authorization codes are marked `used_at` upon the first `/token` call; replayed requests are rejected.
+   - TOTP codes track `last_used_step` to reject repeated use of the same OTP within its 30-second window.
+5. **Session Hijacking via Scripting**:
+   - Browser sessions are stored in `HttpOnly` cookies, preventing client-side JavaScript access.
+
+### What This System Does NOT Defend Against
+1. **Compromised Host / Infrastructure**:
+   - If the server host running `idp-api` is compromised, an attacker with root access can read environment variables (`SECRET_ENCRYPTION_KEY`, RSA private keys).
+2. **Direct SQL Database Tampering**:
+   - An administrator or attacker with direct `UPDATE` privileges on PostgreSQL can alter audit records or user flags. (Stage 5a cryptographic hash chaining adds tamper-evidence).
+3. **Phishing via Fraudulent Domains**:
+   - Without WebAuthn / FIDO2 hardware credentials, users can still be tricked into typing passwords and 6-digit TOTP codes into reverse-proxy phishing sites (e.g., Evilginx).
+4. **Volumetric Denial of Service (DDoS)**:
+   - In-memory rate limiting operates per-instance; distributed volumetric attacks require an upstream cloud WAF (e.g., AWS WAF / Cloudflare).
+
+---
+
+## Known Limitations
+
+- **In-Memory Rate Limiting**: The default rate limiter runs in application memory. In multi-instance deployments behind a load balancer, instances do not share failure counts without Redis.
+- **Single Active Signing Key**: Key rotation is supported through `kid` lookups, but automated scheduled rotation and retirement lifecycle policies require manual execution.
+- **Admin Role Assignment**: In production, open registration must be restricted (`ALLOW_OPEN_REGISTRATION=false`) and administrator accounts must be provisioned via explicit environment configuration (`ADMIN_EMAIL`) or administrative commands to prevent registration takeover.
 
 ---
 
@@ -143,9 +184,8 @@ Services will be available at:
 - **OpenID Discovery Metadata**: `http://localhost:8000/.well-known/openid-configuration`
 - **JWKS Endpoint**: `http://localhost:8000/.well-known/jwks.json`
 
-### Seeded Credentials & First Admin User
-- The default demo client `demo-client-app` with redirect URI `http://localhost:5174/callback` is seeded automatically on startup.
-- The **first user registered** through the web interface automatically receives administrative privileges (`is_admin: true`), providing access to the **Admin Console** at `http://localhost:5173/admin` for audit logs and client management.
+### Administrator Account
+The default administrative email is `admin@example.com` (configured via `ADMIN_EMAIL`). Registering with this address grants access to the **Admin Console** at `http://localhost:5173/admin` for client management and audit logs.
 
 ---
 
@@ -156,9 +196,9 @@ The backend test suite covers official RFC 6238 Appendix B test vectors, PKCE ch
 
 ```bash
 cd idp-api
-# Using virtual environment:
 pytest -v --cov=app --cov-report=term-missing
 ```
+*Current coverage: 28 passed, 86% line coverage.*
 
 ### 2. Frontend Tests (Vitest & React Testing Library)
 Run unit and component tests for both frontend applications:
@@ -180,8 +220,6 @@ ruff check .
 ```
 
 ### 4. End-to-End Tests (Playwright)
-The end-to-end suite registers a fresh account, captures the TOTP secret, computes a genuine RFC 6238 OTP code on-the-fly, completes the OIDC PKCE flow, and verifies token claims in the demo app:
-
 ```bash
 cd e2e
 npm install
@@ -190,25 +228,17 @@ npx playwright test
 
 ---
 
-## What Is Missing on Purpose (and Why)
+## Troubleshooting
 
-In alignment with the project plan, the following features were scoped out of the minimum viable implementation to keep the codebase focused, understandable, and testable:
-
-1. **Refresh Tokens and Token Revocation**:
-   - *Rationale*: OpenID Connect Core defines the authorization code flow without strictly requiring refresh tokens for public clients. Short-lived access tokens (15 minutes) reduce the window of exposure, and omitting refresh tokens avoids complex storage rotation requirements in browser single-page applications.
-2. **Interactive OAuth 2.0 Consent Screen**:
-   - *Rationale*: In first-party Single Sign-On environments (such as corporate internal SSO or HENNGE One), user consent is typically pre-granted by corporate policy rather than prompted interactively on every login.
-3. **Automated Signing-Key Rotation**:
-   - *Rationale*: Key rotation requires maintaining multiple valid keys in the JWKS endpoint simultaneously and managing rollover transition periods. The system is designed key-rotation-ready (keys have a `kid` and are queried dynamically from the database), but automated scheduled rotation was omitted to avoid unnecessary operational complexity in local development.
-4. **Account Recovery & Backup Codes**:
-   - *Rationale*: Self-service account recovery introduces significant attack surface (email reset token hijack, SMS interception). In corporate SSO, recovery is traditionally handled out-of-band by directory administrators.
-
----
-
-## Tech Stack Summary
-
-- **Backend**: Python 3.12+, FastAPI, Pydantic v2, SQLAlchemy 2.0, Alembic, PostgreSQL
-- **Security & Cryptography**: `argon2-cffi`, `pyjwt[crypto]`, `cryptography`, `segno`, custom RFC 6238 TOTP
-- **Frontend**: React 18, TypeScript, Vite, React Router 6, Tailwind CSS, `jose`
-- **Testing**: `pytest`, `pytest-cov`, `httpx`, `vitest`, React Testing Library, Playwright
-- **DevOps**: Docker, Docker Compose, Nginx, GitHub Actions CI/CD
+- **Postgres Port Conflict (`bind: address already in use: 5432`)**:
+  - *Cause*: A local PostgreSQL instance is already running on port 5432.
+  - *Fix*: Stop the local service (`sudo systemctl stop postgresql` on Linux or stop the PostgreSQL Windows service) or adjust the mapped port in `docker-compose.yml` (`5433:5432`).
+- **CORS Errors When Calling API**:
+  - *Cause*: Accessing the frontend via an origin not listed in `CORS_ALLOWED_ORIGINS` (e.g. `127.0.0.1` vs `localhost`).
+  - *Fix*: Access via `http://localhost:5174` or add your custom origin to `CORS_ALLOWED_ORIGINS` in `.env`.
+- **TOTP Verification Fails Repeatedly**:
+  - *Cause*: Host machine clock drift exceeding 30 seconds compared to the authenticator phone.
+  - *Fix*: Synchronize system time via NTP / Windows Time settings.
+- **Database Migrations Fail on Fresh Postgres**:
+  - *Cause*: The API container started before Postgres was ready to accept TCP connections.
+  - *Fix*: The `docker-compose.yml` includes a healthcheck `pg_isready -U postgres -d minisso` with `condition: service_healthy` to guarantee correct startup order.
