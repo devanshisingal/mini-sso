@@ -8,6 +8,7 @@ import base64
 import time
 import uuid
 from typing import Any
+
 import jwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa

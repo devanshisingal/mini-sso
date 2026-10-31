@@ -7,12 +7,13 @@ timestamp 59 in SHA256 and 1234567890 in SHA512).
 
 import hashlib
 from urllib.parse import unquote
+
 from app.core.totp import (
+    generate_qr_svg_data_uri,
     generate_totp,
     generate_totp_secret,
     get_totp_provisioning_uri,
     verify_totp,
-    generate_qr_svg_data_uri,
 )
 
 # RFC 6238 Appendix B Test Keys

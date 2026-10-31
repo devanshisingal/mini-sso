@@ -3,10 +3,10 @@ Tests for Argon2id password hashing and secret cipher encryption.
 """
 
 from app.core.security import (
-    hash_password,
-    verify_password,
     SecretCipher,
     generate_secure_token,
+    hash_password,
+    verify_password,
 )
 
 
