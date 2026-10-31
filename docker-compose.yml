@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: mini-sso-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+      POSTGRES_DB: minisso
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d minisso"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  idp-api:
+    build:
+      context: ./idp-api
+      dockerfile: Dockerfile
+    container_name: mini-sso-api
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:postgrespassword@db:5432/minisso
+      ISSUER_URL: http://localhost:8000
+      IDP_UI_URL: http://localhost:5173
+      DEMO_APP_URL: http://localhost:5174
+      SECRET_ENCRYPTION_KEY: mini-sso-master-secret-encryption-key-32b
+      COOKIE_SECURE: "false"
+    ports:
+      - "8000:8000"
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    restart: unless-stopped
+
+  idp-ui:
+    build:
+      context: ./idp-ui
+      dockerfile: Dockerfile
+    container_name: mini-sso-idp-ui
+    depends_on:
+      - idp-api
+    ports:
+      - "5173:80"
+    restart: unless-stopped
+
+  demo-app:
+    build:
+      context: ./demo-app
+      dockerfile: Dockerfile
+    container_name: mini-sso-demo-app
+    depends_on:
+      - idp-api
+    ports:
+      - "5174:80"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
