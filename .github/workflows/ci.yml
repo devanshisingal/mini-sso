@@ -21,8 +21,8 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d minisso_test"
-          --health-interval 5s
+          --health-cmd pg_isready
+          --health-interval 10s
           --health-timeout 5s
           --health-retries 5
 
@@ -47,15 +47,15 @@ jobs:
 
       - name: Run Alembic Migrations against Postgres
         env:
-          DATABASE_URL: postgresql+psycopg2://postgres:postgrespassword@localhost:5432/minisso_test
+          DATABASE_URL: "postgresql+psycopg2://postgres:postgrespassword@localhost:5432/minisso_test"
         run: |
           cd idp-api
           alembic upgrade head
 
       - name: Run Pytest with Coverage
         env:
-          DATABASE_URL: sqlite:///:memory:
-          SECRET_ENCRYPTION_KEY: ci-test-secret-encryption-key-32b
+          DATABASE_URL: "sqlite:///:memory:"
+          SECRET_ENCRYPTION_KEY: "ci-test-secret-encryption-key-32b"
         run: |
           cd idp-api
           pytest -v --cov=app --cov-report=term-missing
