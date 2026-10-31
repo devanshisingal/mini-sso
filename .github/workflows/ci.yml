@@ -21,14 +21,10 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U postgres -d minisso_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 5
-
-    defaults:
-      run:
-        working-directory: idp-api
 
     steps:
       - name: Checkout Code
@@ -39,36 +35,34 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
+          cache-dependency-path: "idp-api/requirements.txt"
 
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt psycopg2-binary
+          pip install -r idp-api/requirements.txt psycopg2-binary
 
       - name: Ruff Lint Check
-        run: ruff check .
+        run: ruff check idp-api
 
-      - name: Run Database Migrations
+      - name: Run Alembic Migrations against Postgres
         env:
           DATABASE_URL: postgresql+psycopg2://postgres:postgrespassword@localhost:5432/minisso_test
-        run: alembic upgrade head
+        run: |
+          cd idp-api
+          alembic upgrade head
 
       - name: Run Pytest with Coverage
         env:
           DATABASE_URL: sqlite:///:memory:
           SECRET_ENCRYPTION_KEY: ci-test-secret-encryption-key-32b
-        run: pytest -v --cov=app --cov-report=term-missing
+        run: |
+          cd idp-api
+          pytest -v --cov=app --cov-report=term-missing
 
-  frontend-tests:
-    name: Frontend (${{ matrix.app }})
+  idp-ui-build-and-test:
+    name: IdP UI (React + TypeScript)
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        app: [idp-ui, demo-app]
-
-    defaults:
-      run:
-        working-directory: ${{ matrix.app }}
 
     steps:
       - name: Checkout Code
@@ -79,21 +73,57 @@ jobs:
         with:
           node-version: 22
           cache: "npm"
-          cache-dependency-path: "${{ matrix.app }}/package-lock.json"
+          cache-dependency-path: "idp-ui/package-lock.json"
 
       - name: Install Dependencies
-        run: npm ci
+        run: |
+          cd idp-ui
+          npm ci
 
-      - name: Run TypeScript & Vite Build
-        run: npm run build
+      - name: TypeScript & Vite Build
+        run: |
+          cd idp-ui
+          npm run build
 
-      - name: Run Vitest Unit Tests
-        run: npm test
+      - name: Vitest Unit Tests
+        run: |
+          cd idp-ui
+          npm test
+
+  demo-app-build-and-test:
+    name: Demo Client App (React + TypeScript)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+          cache-dependency-path: "demo-app/package-lock.json"
+
+      - name: Install Dependencies
+        run: |
+          cd demo-app
+          npm ci
+
+      - name: TypeScript & Vite Build
+        run: |
+          cd demo-app
+          npm run build
+
+      - name: Vitest Unit Tests
+        run: |
+          cd demo-app
+          npm test
 
   docker-build:
     name: Container Build Verification
     runs-on: ubuntu-latest
-    needs: [backend-lint-and-test, frontend-tests]
+    needs: [backend-lint-and-test, idp-ui-build-and-test, demo-app-build-and-test]
 
     steps:
       - name: Checkout Code
