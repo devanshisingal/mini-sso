@@ -10,7 +10,6 @@ from urllib.parse import parse_qs, urlparse
 from app.core.pkce import calculate_s256_challenge
 from app.core.totp import generate_totp, generate_totp_secret, verify_totp
 from app.models import AuditLog, Client
-from app.services.auth_service import hash_token
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +158,6 @@ def test_authorization_code_expiry_with_controlled_clock(client, db_session):
         assert "Authorization code has expired" in token_resp.json()["detail"]
 
     # Verify expiration rejection was recorded in the audit log
-    code_hash = hash_token(code)
     audit_entry = db_session.query(AuditLog).filter(
         AuditLog.details.like("%expired%")
     ).first()
