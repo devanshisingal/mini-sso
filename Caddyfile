@@ -1,0 +1,56 @@
+{
+  email {$ACME_EMAIL:admin@example.com}
+}
+
+# Identity Provider API & UI
+{$IDP_DOMAIN:auth.example.com} {
+  encode gzip zstd
+
+  # Security Headers
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    X-Content-Type-Options "nosniff"
+    X-Frame-Options "DENY"
+    Referrer-Policy "strict-origin-when-cross-origin"
+    Permissions-Policy "camera=(), microphone=(), geolocation=()"
+  }
+
+  # API Endpoints routed to FastAPI backend
+  @api_paths {
+    path /.well-known/*
+    path /authorize*
+    path /token*
+    path /userinfo*
+    path /register*
+    path /login*
+    path /logout*
+    path /mfa/*
+    path /me*
+    path /admin/*
+    path /health*
+  }
+  handle @api_paths {
+    reverse_proxy idp-api:8000
+  }
+
+  # All other routes served by IdP React UI
+  handle {
+    reverse_proxy idp-ui:80
+  }
+}
+
+# Demo Client Application
+{$DEMO_DOMAIN:app.example.com} {
+  encode gzip zstd
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    X-Content-Type-Options "nosniff"
+    X-Frame-Options "DENY"
+    Referrer-Policy "strict-origin-when-cross-origin"
+  }
+
+  handle {
+    reverse_proxy demo-app:80
+  }
+}

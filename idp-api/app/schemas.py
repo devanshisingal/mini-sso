@@ -18,7 +18,7 @@ class UserRegisterRequest(BaseModel):
 
 class UserLoginRequest(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(max_length=128)
 
 
 class UserResponse(BaseModel):
@@ -38,15 +38,20 @@ class LoginResponse(BaseModel):
     next_step: Optional[str] = None  # e.g., "/mfa/verify" if 2FA needed
 
 
-# MFA / TOTP
+# MFA / TOTP / Recovery
 class MfaEnrollResponse(BaseModel):
     secret: str
     provisioning_uri: str
     qr_code_svg: str
+    recovery_codes: list[str] = Field(default_factory=list)
 
 
 class MfaVerifyRequest(BaseModel):
     code: str = Field(min_length=6, max_length=6)
+
+
+class MfaRecoveryRequest(BaseModel):
+    code: str = Field(min_length=6, max_length=64)
 
 
 class MfaVerifyResponse(BaseModel):
@@ -134,3 +139,27 @@ class AuditLogResponse(BaseModel):
     ip: Optional[str] = None
     user_agent: Optional[str] = None
     details: Optional[str] = None
+    prev_hash: Optional[str] = None
+    entry_hash: Optional[str] = None
+
+
+class AuditVerificationResponse(BaseModel):
+    valid: bool
+    total_verified: int = 0
+    latest_hash: Optional[str] = None
+    tampered_id: Optional[int] = None
+    reason: Optional[str] = None
+    message: Optional[str] = None
+
+
+class KeyRotationResponse(BaseModel):
+    status: str
+    new_kid: str
+    previous_kid: str
+    message: str
+
+
+class MaintenanceCleanupResponse(BaseModel):
+    purged_codes: int
+    purged_sessions: int
+    message: str

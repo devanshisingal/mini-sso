@@ -25,6 +25,7 @@ from app.models import SessionRecord, TotpCredential, User
 from app.schemas import (
     LoginResponse,
     MfaEnrollResponse,
+    MfaRecoveryRequest,
     MfaVerifyRequest,
     MfaVerifyResponse,
     UserLoginRequest,
@@ -32,7 +33,13 @@ from app.schemas import (
     UserResponse,
 )
 from app.services.audit_service import log_audit_event
-from app.services.auth_service import create_session, delete_session, get_session_by_token
+from app.services.auth_service import (
+    create_session,
+    delete_session,
+    generate_and_store_recovery_codes,
+    get_session_by_token,
+    verify_and_consume_recovery_code,
+)
 
 router = APIRouter(tags=["Authentication"])
 cipher = SecretCipher()
@@ -294,6 +301,8 @@ def enroll_mfa(
     )
     qr_svg = generate_qr_svg_data_uri(provisioning_uri)
 
+    recovery_codes = generate_and_store_recovery_codes(db, user.id, count=10)
+
     log_audit_event(
         db,
         event="mfa_enroll_started",
@@ -305,6 +314,7 @@ def enroll_mfa(
         secret=raw_secret,
         provisioning_uri=provisioning_uri,
         qr_code_svg=qr_svg,
+        recovery_codes=recovery_codes,
     )
 
 
@@ -392,6 +402,77 @@ def verify_mfa(
     return MfaVerifyResponse(
         status="success",
         message="Two-factor authentication verified successfully",
+        user=UserResponse(
+            id=user.id,
+            email=user.email,
+            is_admin=user.is_admin,
+            has_mfa=True,
+            created_at=user.created_at,
+        ),
+    )
+
+
+@router.post("/mfa/recovery", response_model=MfaVerifyResponse)
+def verify_mfa_recovery(
+    req: MfaRecoveryRequest,
+    request: Request,
+    auth_data: tuple[User, SessionRecord] = Depends(get_current_user_and_session),
+    db: Session = Depends(get_db),
+):
+    """
+    Verifies and consumes a single-use backup recovery code when user cannot provide TOTP.
+    """
+    user, session_rec = auth_data
+    client_ip = request.client.host if request.client else "unknown"
+    rate_key = f"recovery:{user.id}"
+
+    is_limited, retry_after = mfa_rate_limiter.is_rate_limited(rate_key)
+    if is_limited:
+        log_audit_event(
+            db,
+            event="recovery_rate_limited",
+            outcome="blocked",
+            user_id=user.id,
+            ip=client_ip,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many incorrect attempts. Please wait {retry_after} seconds.",
+        )
+
+    consumed = verify_and_consume_recovery_code(db, user.id, req.code)
+    if not consumed:
+        mfa_rate_limiter.record_failure(rate_key)
+        log_audit_event(
+            db,
+            event="recovery_code_failed",
+            outcome="failure",
+            user_id=user.id,
+            ip=client_ip,
+            details="Invalid or already-consumed recovery code",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or already-used recovery code",
+        )
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    session_rec.mfa_verified_at = now
+    db.commit()
+
+    mfa_rate_limiter.reset(rate_key)
+    log_audit_event(
+        db,
+        event="recovery_code_success",
+        outcome="success",
+        user_id=user.id,
+        ip=client_ip,
+        details="User authenticated via single-use backup recovery code",
+    )
+
+    return MfaVerifyResponse(
+        status="success",
+        message="Recovery code accepted. Session authenticated.",
         user=UserResponse(
             id=user.id,
             email=user.email,

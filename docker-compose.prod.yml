@@ -1,0 +1,108 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: mini-sso-prod-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-minisso}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-minisso_prod}
+    volumes:
+      - prod_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-minisso} -d ${POSTGRES_DB:-minisso_prod}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal_net
+
+  idp-api:
+    build:
+      context: ./idp-api
+      dockerfile: Dockerfile
+    container_name: mini-sso-prod-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-minisso}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-minisso_prod}
+      ISSUER_URL: https://${IDP_DOMAIN}
+      IDP_UI_URL: https://${IDP_DOMAIN}
+      DEMO_APP_URL: https://${DEMO_DOMAIN}
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY}
+      COOKIE_SECURE: "true"
+      COOKIE_SAMESITE: "lax"
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      ADMIN_API_KEY: ${ADMIN_API_KEY}
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - internal_net
+
+  idp-ui:
+    build:
+      context: ./idp-ui
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: https://${IDP_DOMAIN}
+    container_name: mini-sso-prod-ui
+    restart: unless-stopped
+    depends_on:
+      idp-api:
+        condition: service_healthy
+    networks:
+      - internal_net
+
+  demo-app:
+    build:
+      context: ./demo-app
+      dockerfile: Dockerfile
+      args:
+        VITE_IDP_ISSUER: https://${IDP_DOMAIN}
+    container_name: mini-sso-prod-demo
+    restart: unless-stopped
+    depends_on:
+      idp-api:
+        condition: service_healthy
+    networks:
+      - internal_net
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: mini-sso-prod-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      IDP_DOMAIN: ${IDP_DOMAIN}
+      DEMO_DOMAIN: ${DEMO_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - idp-ui
+      - demo-app
+    networks:
+      - internal_net
+
+volumes:
+  prod_pgdata:
+  caddy_data:
+  caddy_config:
+
+networks:
+  internal_net:
+    driver: bridge

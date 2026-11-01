@@ -14,8 +14,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.core.jwt_service import JwtService, generate_rsa_key_pair
-from app.models import Client, SessionRecord, SigningKey
+from app.core.jwt_service import JwtService, generate_rsa_key_pair, rsa_public_pem_to_jwk
+from app.models import AuthorizationCode, Client, RecoveryCode, SessionRecord, SigningKey, utcnow
 
 
 def hash_token(raw_token: str) -> str:
@@ -62,7 +62,6 @@ def get_session_by_token(db: Session, raw_token: str) -> Optional[SessionRecord]
         return None
 
     now = datetime.datetime.now(datetime.timezone.utc)
-    # Ensure timezone-aware comparison
     expires_at = session_rec.expires_at
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
@@ -113,6 +112,108 @@ def get_or_create_jwt_service(db: Session) -> JwtService:
         public_pem=key_record.public_key,
         issuer=settings.ISSUER_URL,
     )
+
+
+def rotate_signing_key(db: Session) -> tuple[str, str]:
+    """
+    Retires the currently active RSA signing key and issues a new active key.
+    Returns (new_kid, previous_kid).
+    """
+    active_key = db.scalars(
+        select(SigningKey).where(SigningKey.active.is_(True)).order_by(SigningKey.created_at.desc())
+    ).first()
+
+    previous_kid = active_key.kid if active_key else ""
+    if active_key:
+        active_key.active = False
+        active_key.retired_at = utcnow()
+
+    kid, priv_pem, pub_pem = generate_rsa_key_pair(2048)
+    new_key = SigningKey(
+        kid=kid,
+        private_key=priv_pem,
+        public_key=pub_pem,
+        active=True,
+    )
+    db.add(new_key)
+    db.commit()
+    db.refresh(new_key)
+    return new_key.kid, previous_kid
+
+
+def get_all_jwks(db: Session) -> dict[str, list[dict[str, str]]]:
+    """Returns the JWKS dictionary containing all active and retired public keys."""
+    keys = db.scalars(select(SigningKey).order_by(SigningKey.created_at.desc())).all()
+    jwks_keys = [rsa_public_pem_to_jwk(k.kid, k.public_key) for k in keys]
+    return {"keys": jwks_keys}
+
+
+def generate_and_store_recovery_codes(db: Session, user_id: str, count: int = 10) -> list[str]:
+    """Generates single-use alphanumeric backup recovery codes (e.g. ABCD-EFGH) and stores SHA-256 hashes."""
+    existing = db.scalars(select(RecoveryCode).where(RecoveryCode.user_id == user_id)).all()
+    for rec in existing:
+        db.delete(rec)
+
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    plain_codes = []
+    for _ in range(count):
+        part1 = "".join(secrets.choice(alphabet) for _ in range(4))
+        part2 = "".join(secrets.choice(alphabet) for _ in range(4))
+        code = f"{part1}-{part2}"
+        plain_codes.append(code)
+
+        db.add(RecoveryCode(
+            user_id=user_id,
+            code_hash=hash_token(code),
+        ))
+    db.commit()
+    return plain_codes
+
+
+def verify_and_consume_recovery_code(db: Session, user_id: str, raw_code: str) -> bool:
+    """Verifies a single-use backup recovery code against stored hashes and consumes it."""
+    clean_code = raw_code.strip().upper()
+    code_hash = hash_token(clean_code)
+
+    rec = db.scalars(
+        select(RecoveryCode).where(
+            RecoveryCode.user_id == user_id,
+            RecoveryCode.code_hash == code_hash,
+            RecoveryCode.used_at.is_(None),
+        )
+    ).first()
+
+    if not rec:
+        return False
+
+    rec.used_at = utcnow()
+    db.commit()
+    return True
+
+
+def cleanup_expired_records(db: Session) -> tuple[int, int]:
+    """
+    Sweeps and deletes expired authorization codes and expired sessions.
+    Returns (purged_codes_count, purged_sessions_count).
+    """
+    now = utcnow()
+
+    codes = db.scalars(
+        select(AuthorizationCode).where(
+            (AuthorizationCode.expires_at < now) | (AuthorizationCode.used_at.is_not(None))
+        )
+    ).all()
+    purged_codes = len(codes)
+    for c in codes:
+        db.delete(c)
+
+    sessions = db.scalars(select(SessionRecord).where(SessionRecord.expires_at < now)).all()
+    purged_sessions = len(sessions)
+    for s in sessions:
+        db.delete(s)
+
+    db.commit()
+    return purged_codes, purged_sessions
 
 
 def is_ip_allowed(client: Client, client_ip: Optional[str]) -> bool:

@@ -14,8 +14,20 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.models import AuditLog, Client, User
-from app.schemas import AuditLogResponse, ClientCreateRequest, ClientResponse
-from app.services.auth_service import get_session_by_token
+from app.schemas import (
+    AuditLogResponse,
+    AuditVerificationResponse,
+    ClientCreateRequest,
+    ClientResponse,
+    KeyRotationResponse,
+    MaintenanceCleanupResponse,
+)
+from app.services.audit_service import log_audit_event, verify_audit_log_integrity
+from app.services.auth_service import (
+    cleanup_expired_records,
+    get_session_by_token,
+    rotate_signing_key,
+)
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -101,7 +113,6 @@ def create_client(
     db.commit()
     db.refresh(client)
 
-    from app.services.audit_service import log_audit_event
     client_ip = request.client.host if request.client else "unknown"
     log_audit_event(
         db,
@@ -134,3 +145,72 @@ def get_audit_log(
     query = query.offset(offset).limit(limit)
     logs = db.scalars(query).all()
     return logs
+
+
+@router.get("/audit-log/verify", response_model=AuditVerificationResponse)
+def verify_audit_log(
+    db: Session = Depends(get_db),
+    _admin: User | None = Depends(require_admin),
+):
+    """
+    Cryptographically verifies the SHA-256 hash chain of the entire audit log.
+    Detects any tampering, alteration, omission, or insertion in audit records.
+    """
+    result = verify_audit_log_integrity(db)
+    return AuditVerificationResponse(**result)
+
+
+@router.post("/keys/rotate", response_model=KeyRotationResponse)
+def rotate_key(
+    request: Request,
+    db: Session = Depends(get_db),
+    _admin: User | None = Depends(require_admin),
+):
+    """
+    Rotates the active RSA signing key pair.
+    Existing keys are preserved in JWKS for token validation until natural expiry.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    new_kid, previous_kid = rotate_signing_key(db)
+
+    log_audit_event(
+        db,
+        event="key_rotated",
+        outcome="success",
+        ip=client_ip,
+        details=f"Rotated RSA signing key from '{previous_kid}' to '{new_kid}'",
+    )
+
+    return KeyRotationResponse(
+        status="success",
+        new_kid=new_kid,
+        previous_kid=previous_kid,
+        message=f"Successfully rotated signing key. New active kid: {new_kid}",
+    )
+
+
+@router.post("/maintenance/cleanup", response_model=MaintenanceCleanupResponse)
+def run_maintenance_cleanup(
+    request: Request,
+    db: Session = Depends(get_db),
+    _admin: User | None = Depends(require_admin),
+):
+    """
+    Sweeps and removes expired authorization codes and expired sessions from database.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    purged_codes, purged_sessions = cleanup_expired_records(db)
+
+    log_audit_event(
+        db,
+        event="maintenance_cleanup",
+        outcome="success",
+        ip=client_ip,
+        details=f"Purged {purged_codes} expired/used auth codes and {purged_sessions} expired sessions",
+    )
+
+    return MaintenanceCleanupResponse(
+        purged_codes=purged_codes,
+        purged_sessions=purged_sessions,
+        message=f"Cleaned up {purged_codes} expired codes and {purged_sessions} expired sessions.",
+    )

@@ -10,10 +10,12 @@ export const MfaEnroll: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [secret, setSecret] = useState('');
   const [qrCodeSvg, setQrCodeSvg] = useState('');
+  const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [copiedSecret, setCopiedSecret] = useState(false);
+  const [copiedCodes, setCopiedCodes] = useState(false);
 
   const clientId = queryParams.get('client_id');
   const redirectUri = queryParams.get('redirect_uri');
@@ -24,6 +26,7 @@ export const MfaEnroll: React.FC = () => {
         const data = await api.enrollMfa();
         setSecret(data.secret);
         setQrCodeSvg(data.qr_code_svg);
+        setRecoveryCodes(data.recovery_codes || []);
       } catch (err: unknown) {
         if (err instanceof Error) {
           setError(err.message);
@@ -45,9 +48,7 @@ export const MfaEnroll: React.FC = () => {
     try {
       await api.verifyMfa(code);
 
-      // Successfully confirmed 2FA!
       if (clientId && redirectUri) {
-        // Resume OIDC authorization flow
         window.location.href = `http://localhost:8000/authorize?${queryParams.toString()}`;
         return;
       }
@@ -66,13 +67,19 @@ export const MfaEnroll: React.FC = () => {
 
   const copySecret = () => {
     navigator.clipboard.writeText(secret);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    setCopiedSecret(true);
+    setTimeout(() => setCopiedSecret(false), 2000);
+  };
+
+  const copyAllRecoveryCodes = () => {
+    navigator.clipboard.writeText(recoveryCodes.join('\n'));
+    setCopiedCodes(true);
+    setTimeout(() => setCopiedCodes(false), 2000);
   };
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-100 p-4">
-      <div className="max-w-md w-full bg-white rounded-2xl shadow-xl border border-slate-200 overflow-hidden">
+      <div className="max-w-lg w-full bg-white rounded-2xl shadow-xl border border-slate-200 overflow-hidden my-8">
         {/* Header */}
         <div className="bg-gradient-to-r from-blue-700 to-indigo-800 p-6 text-white text-center">
           <div className="inline-flex items-center justify-center w-12 h-12 bg-white/10 rounded-xl mb-3 backdrop-blur-sm">
@@ -86,7 +93,7 @@ export const MfaEnroll: React.FC = () => {
 
         <div className="p-8">
           {error && (
-            <div className="mb-5 p-3.5 bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg flex items-start">
+            <div role="alert" className="mb-5 p-3.5 bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg flex items-start">
               <svg className="w-5 h-5 text-red-500 mr-2 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
                 <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
               </svg>
@@ -97,27 +104,28 @@ export const MfaEnroll: React.FC = () => {
           {loading ? (
             <div className="py-12 text-center text-slate-500">
               <div className="animate-spin inline-block w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full mb-3"></div>
-              <p>Generating cryptographically secure secret...</p>
+              <p>Generating cryptographically secure secret and recovery codes...</p>
             </div>
           ) : (
             <div className="space-y-6">
-              {/* QR Code Container */}
+              {/* Step 1: QR Code */}
               <div className="flex flex-col items-center">
                 <div className="p-3 bg-white border border-slate-200 rounded-xl shadow-inner">
                   <img src={qrCodeSvg} alt="TOTP QR Code" className="w-48 h-48" />
                 </div>
-                <p className="text-xs text-slate-500 mt-2 text-center">
+                <p className="text-xs text-slate-600 mt-2 text-center">
                   Scan this QR code with Google Authenticator, 1Password, or Authy.
                 </p>
               </div>
 
               {/* Secret Key Manual Entry */}
               <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
+                <label htmlFor="totp-secret" className="block text-xs font-semibold text-slate-600 uppercase tracking-wider mb-1">
                   Or enter secret key manually
                 </label>
                 <div className="flex rounded-lg shadow-sm">
                   <input
+                    id="totp-secret"
                     type="text"
                     readOnly
                     value={secret}
@@ -128,24 +136,67 @@ export const MfaEnroll: React.FC = () => {
                     onClick={copySecret}
                     className="inline-flex items-center px-3 py-2 border border-l-0 border-slate-300 rounded-r-lg bg-slate-100 hover:bg-slate-200 text-xs font-medium text-slate-700"
                   >
-                    {copied ? 'Copied!' : 'Copy'}
+                    {copiedSecret ? 'Copied!' : 'Copy'}
                   </button>
                 </div>
               </div>
 
-              {/* Code Verification Form */}
+              {/* Step 2: Backup Recovery Codes */}
+              {recoveryCodes.length > 0 && (
+                <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center space-x-2">
+                      <svg className="w-5 h-5 text-amber-600" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+                      </svg>
+                      <h2 className="text-xs font-bold text-amber-900 uppercase tracking-wide">
+                        Backup Recovery Codes
+                      </h2>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={copyAllRecoveryCodes}
+                      className="text-xs font-semibold text-amber-800 hover:text-amber-950 underline focus:outline-none"
+                    >
+                      {copiedCodes ? 'Copied All!' : 'Copy All'}
+                    </button>
+                  </div>
+                  <p className="text-xs text-amber-800 mb-3 leading-relaxed">
+                    Save these 10 one-time recovery codes in a secure password manager. If you ever lose your phone, each code grants emergency sign-in once.
+                  </p>
+                  <div className="grid grid-cols-2 gap-1.5 bg-white p-3 rounded-lg border border-amber-200 font-mono text-xs text-slate-800 text-center select-all">
+                    {recoveryCodes.map((c, i) => (
+                      <div key={i} className="py-1 px-2 bg-slate-50 rounded border border-slate-200">
+                        {c}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Step 3: Code Verification Form */}
               <form onSubmit={handleVerify} className="space-y-4 pt-2 border-t border-slate-100">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">
-                    Enter the 6-digit code from your app
+                  <label htmlFor="verification-code" className="block text-sm font-medium text-slate-700 mb-1">
+                    Enter the 6-digit code from your app to confirm
                   </label>
                   <input
+                    id="verification-code"
                     type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
                     required
                     maxLength={6}
                     pattern="[0-9]{6}"
                     value={code}
                     onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
+                    onPaste={(e) => {
+                      const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 6);
+                      if (pasted) {
+                        e.preventDefault();
+                        setCode(pasted);
+                      }
+                    }}
                     placeholder="123456"
                     className="w-full text-center tracking-widest text-2xl font-mono px-3 py-2 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   />
@@ -154,9 +205,9 @@ export const MfaEnroll: React.FC = () => {
                 <button
                   type="submit"
                   disabled={verifying || code.length !== 6}
-                  className="w-full py-2.5 px-4 bg-blue-700 hover:bg-blue-800 text-white font-medium rounded-lg text-sm transition duration-150 flex items-center justify-center disabled:opacity-50"
+                  className="w-full py-2.5 px-4 bg-blue-700 hover:bg-blue-800 text-white font-medium rounded-lg text-sm transition duration-150 flex items-center justify-center disabled:opacity-50 focus:ring-2 focus:ring-offset-2 focus:ring-blue-600"
                 >
-                  {verifying ? 'Verifying Code...' : 'Activate 2FA & Continue'}
+                  {verifying ? 'Verifying Code...' : 'Activate 2FA & Complete'}
                 </button>
               </form>
             </div>

@@ -41,6 +41,9 @@ class User(Base):
     sessions: Mapped[list["SessionRecord"]] = relationship(
         "SessionRecord", back_populates="user", cascade="all, delete-orphan"
     )
+    recovery_codes: Mapped[list["RecoveryCode"]] = relationship(
+        "RecoveryCode", back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class TotpCredential(Base):
@@ -95,6 +98,20 @@ class SessionRecord(Base):
     user: Mapped["User"] = relationship("User", back_populates="sessions")
 
 
+class RecoveryCode(Base):
+    __tablename__ = "recovery_codes"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)  # SHA-256 of code
+    used_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    user: Mapped["User"] = relationship("User", back_populates="recovery_codes")
+
+
 class SigningKey(Base):
     __tablename__ = "signing_keys"
 
@@ -103,6 +120,7 @@ class SigningKey(Base):
     public_key: Mapped[str] = mapped_column(Text, nullable=False)   # PEM format
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    retired_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AuditLog(Base):
@@ -117,3 +135,5 @@ class AuditLog(Base):
     ip: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
     user_agent: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     details: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    prev_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    entry_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)

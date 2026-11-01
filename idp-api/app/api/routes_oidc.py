@@ -39,6 +39,7 @@ from app.schemas import (
 )
 from app.services.audit_service import log_audit_event
 from app.services.auth_service import (
+    get_all_jwks,
     get_or_create_jwt_service,
     get_session_by_token,
     hash_token,
@@ -69,9 +70,8 @@ def openid_configuration():
 
 @router.get("/.well-known/jwks.json")
 def jwks(db: Session = Depends(get_db)):
-    """Returns the JSON Web Key Set (JWKS) containing active public keys for verifying ID tokens."""
-    jwt_svc = get_or_create_jwt_service(db)
-    return jwt_svc.get_jwks()
+    """Returns the JSON Web Key Set (JWKS) containing active and retired public keys for verifying ID tokens."""
+    return get_all_jwks(db)
 
 
 @router.get("/authorize")

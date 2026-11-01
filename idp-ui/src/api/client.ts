@@ -27,6 +27,30 @@ export interface AuditLogItem {
   ip?: string;
   user_agent?: string;
   details?: string;
+  prev_hash?: string;
+  entry_hash?: string;
+}
+
+export interface AuditVerificationResult {
+  valid: boolean;
+  total_verified: number;
+  latest_hash?: string;
+  tampered_id?: number;
+  reason?: string;
+  message?: string;
+}
+
+export interface KeyRotationResult {
+  status: string;
+  new_kid: string;
+  previous_kid: string;
+  message: string;
+}
+
+export interface MaintenanceCleanupResult {
+  purged_codes: number;
+  purged_sessions: number;
+  message: string;
 }
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
@@ -75,6 +99,7 @@ export const api = {
     secret: string;
     provisioning_uri: string;
     qr_code_svg: string;
+    recovery_codes: string[];
   }> {
     return request('/mfa/enroll', {
       method: 'POST',
@@ -87,6 +112,17 @@ export const api = {
     user?: User;
   }> {
     return request('/mfa/verify', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    });
+  },
+
+  async verifyRecoveryCode(code: string): Promise<{
+    status: string;
+    message: string;
+    user?: User;
+  }> {
+    return request('/mfa/recovery', {
       method: 'POST',
       body: JSON.stringify({ code }),
     });
@@ -125,6 +161,24 @@ export const api = {
   async getAuditLogs(): Promise<AuditLogItem[]> {
     return request<AuditLogItem[]>('/admin/audit-log?limit=100', {
       method: 'GET',
+    });
+  },
+
+  async verifyAuditLog(): Promise<AuditVerificationResult> {
+    return request<AuditVerificationResult>('/admin/audit-log/verify', {
+      method: 'GET',
+    });
+  },
+
+  async rotateSigningKey(): Promise<KeyRotationResult> {
+    return request<KeyRotationResult>('/admin/keys/rotate', {
+      method: 'POST',
+    });
+  },
+
+  async cleanupMaintenance(): Promise<MaintenanceCleanupResult> {
+    return request<MaintenanceCleanupResult>('/admin/maintenance/cleanup', {
+      method: 'POST',
     });
   },
 };

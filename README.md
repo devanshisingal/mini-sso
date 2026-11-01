@@ -11,20 +11,23 @@ A lightweight OpenID Connect (OIDC) Identity Provider and Single Sign-On (SSO) s
 
 ## What It Implements
 
-This project implements a subset of the OpenID Connect Core 1.0 and OAuth 2.0 specifications:
+This project implements a robust, spec-compliant subset of OpenID Connect Core 1.0 and OAuth 2.0:
 - **Authorization Code Flow with PKCE (S256 only)**
 - **Discovery Endpoint**: `GET /.well-known/openid-configuration`
-- **JWKS Endpoint**: `GET /.well-known/jwks.json`
+- **Multi-Key JWKS Endpoint**: `GET /.well-known/jwks.json` supporting active and retired keys
 - **UserInfo Endpoint**: `GET /userinfo` (Bearer token authentication)
-- **Second-Factor TOTP**: RFC 6238 implementation using standard library `hmac` and `hashlib` with dynamic truncation and anti-replay protection.
-- **Admin Management & Audit Trail**: Client registration and sign-in audit log.
+- **Second-Factor TOTP**: RFC 6238 implementation from scratch using standard library `hmac` and `hashlib` with dynamic truncation, clock drift tolerance ($\pm 1$ step), and anti-replay protection.
+- **Backup Recovery Codes**: 10 single-use emergency recovery codes generated upon 2FA enrollment.
+- **Tamper-Evident Audit Trail**: Cryptographic SHA-256 hash-chained audit log with integrity verification (`GET /admin/audit-log/verify`).
+- **Signing Key Rotation**: Dynamic active key rollover without downtime or in-flight token invalidation (`POST /admin/keys/rotate`).
+- **Maintenance Sweeps**: Background or on-demand purging of expired authorization codes and stale sessions (`POST /admin/maintenance/cleanup`).
+- **Request Tracing & Structured Logging**: `X-Request-ID` correlation middleware and latency metrics.
 
-### What Is Not Supported
-- Implicit Flow and Hybrid Flow (deprecated for security)
+### What Is Not Supported (By Design)
+- Implicit Flow and Hybrid Flow (deprecated by OAuth 2.1 / BCP for security)
 - Client Secrets for public clients (PKCE is strictly enforced instead)
 - Dynamic Client Registration (RFC 7591)
 - User Consent Screen (designed for first-party enterprise SSO where access is pre-granted)
-- Automated Key Rollover (supported via `kid` lookups, but rollover scheduling is manual)
 - Account Recovery / Password Reset via email
 
 ---
@@ -125,10 +128,13 @@ sequenceDiagram
 | **Clock Drift Window ($\pm 1$ step)** | [`totp.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/core/totp.py) | Validates $[T-1, T, T+1]$ steps (30s tolerance window). Balances user experience across client devices with slight clock synchronization offsets against window expansion risk. |
 | **TOTP Secrets Encrypted at Rest** | [`security.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/core/security.py) | Authenticated symmetric encryption (`SecretCipher` using AES/Fernet with HKDF-derived keys). Prevents exposure of user TOTP seeds if the SQL database or backups are compromised. |
 | **RS256 ID Token Signatures** | [`jwt_service.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/core/jwt_service.py) | Asymmetric RSA key pairs (2048-bit) managed in database with unique `kid` and exposed via `/.well-known/jwks.json`. Relying parties verify ID tokens using public keys without requiring shared secret access. |
+| **Graceful Key Rotation** | [`routes_admin.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/api/routes_admin.py) | Dynamic key rotation endpoint (`POST /admin/keys/rotate`). Preserves retired keys in JWKS so in-flight valid tokens continue verifying until expiry without downtime. |
 | **Rate Limiting & Generic Errors** | [`rate_limiter.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/core/rate_limiter.py) | Sliding-window limiter on failed credentials (5 attempts / 5 min) and TOTP attempts (4 attempts / 3 min); uniform "Invalid email or password" messages to avoid user enumeration. |
+| **Backup Recovery Codes** | [`routes_auth.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/api/routes_auth.py) | 10 single-use recovery codes generated on MFA setup; stored as SHA-256 hashes and consumed upon emergency verification (`POST /mfa/recovery`). |
+| **Tamper-Evident Hash Chain** | [`audit_service.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/services/audit_service.py) | Cryptographic SHA-256 hash chaining (`prev_hash` $\to$ `entry_hash`). Ensures any row alteration, insertion, or deletion breaks the chain and is detected by `GET /admin/audit-log/verify`. |
 | **Client IP CIDR Allowlisting** | [`auth_service.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/services/auth_service.py) | Similar in idea to IP restriction in access control products such as HENNGE One. Restricts authorization requests to trusted organizational networks (e.g. corporate VPNs). |
 | **Secure Session Cookies** | [`routes_auth.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/api/routes_auth.py) | `HttpOnly`, `SameSite=Lax`, and `Secure` cookie attributes. Mitigates Cross-Site Scripting (XSS) token extraction and Cross-Site Request Forgery (CSRF). |
-| **Audit Log Trail** | [`audit_service.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/services/audit_service.py) | Audit log of sign-in events (not tamper-proof). Records timestamp, event type, outcome, user ID, client ID, IP, and user-agent. |
+| **Request Correlation & Timing** | [`main.py`](file:///c:/Users/USER/Desktop/Mini%20SSO/idp-api/app/main.py) | Injects unique `X-Request-ID` UUID headers and logs execution latency for every HTTP transaction. |
 
 ---
 
@@ -138,7 +144,7 @@ sequenceDiagram
 1. **Credential Stuffing and Brute Force**:
    - Argon2id computational memory hardness limits offline dictionary attacks.
    - Sliding-window rate limiters block automated IP/email brute-force campaigns.
-   - Identical error messages prevent attackers from discovering which emails are registered.
+   - Identical error messages and constant-time dummy verifications prevent user enumeration.
 2. **Authorization Code Interception**:
    - The authorization code is delivered via browser query parameters. PKCE S256 ensures an eavesdropper cannot exchange the code without the client's `code_verifier`.
 3. **Open Redirect Attacks**:
@@ -146,17 +152,17 @@ sequenceDiagram
 4. **Code and Token Replay**:
    - Authorization codes are marked `used_at` upon the first `/token` call; replayed requests are rejected.
    - TOTP codes track `last_used_step` to reject repeated use of the same OTP within its 30-second window.
-5. **Session Hijacking via Scripting**:
+5. **Database Audit Log Alteration**:
+   - The SHA-256 cryptographic chain prevents stealth manipulation of audit records.
+6. **Session Hijacking via Scripting**:
    - Browser sessions are stored in `HttpOnly` cookies, preventing client-side JavaScript access.
 
 ### What This System Does NOT Defend Against
 1. **Compromised Host / Infrastructure**:
    - If the server host running `idp-api` is compromised, an attacker with root access can read environment variables (`SECRET_ENCRYPTION_KEY`, RSA private keys).
-2. **Direct SQL Database Tampering**:
-   - An administrator or attacker with direct `UPDATE` privileges on PostgreSQL can alter audit records or user flags. (Stage 5a cryptographic hash chaining adds tamper-evidence).
-3. **Phishing via Fraudulent Domains**:
+2. **Phishing via Fraudulent Domains**:
    - Without WebAuthn / FIDO2 hardware credentials, users can still be tricked into typing passwords and 6-digit TOTP codes into reverse-proxy phishing sites (e.g., Evilginx).
-4. **Volumetric Denial of Service (DDoS)**:
+3. **Volumetric Denial of Service (DDoS)**:
    - In-memory rate limiting operates per-instance; distributed volumetric attacks require an upstream cloud WAF (e.g., AWS WAF / Cloudflare).
 
 ---
@@ -198,7 +204,7 @@ The backend test suite covers official RFC 6238 Appendix B test vectors, PKCE ch
 cd idp-api
 pytest -v --cov=app --cov-report=term-missing
 ```
-*Current coverage: 28 passed, 86% line coverage.*
+*Current coverage: 43 passed, 91% line coverage.*
 
 ### 2. Frontend Tests (Vitest & React Testing Library)
 Run unit and component tests for both frontend applications:
@@ -225,6 +231,21 @@ cd e2e
 npm install
 npx playwright test
 ```
+
+---
+
+## Technical Documentation & Decision Records
+
+Deep architectural documentation, threat modeling, and design rationales are maintained in [`docs/`](file:///c:/Users/USER/Desktop/Mini%20SSO/docs/):
+- **[AWS Production Deployment & Operations Guide](file:///c:/Users/USER/Desktop/Mini%20SSO/docs/aws_deployment_guide.md)**: Terraform IaC, Caddy automated TLS, DNS setup, and backup strategies.
+- **[STRIDE Threat Model](file:///c:/Users/USER/Desktop/Mini%20SSO/docs/threat_model.md)**: In-depth analysis of attack vectors, defenses, and residual security boundaries.
+- **[60-Minute Technical Interview Defense](file:///c:/Users/USER/Desktop/Mini%20SSO/docs/interview_preparation.md)**: RFC explanations, sequence diagrams, and real-world CI debugging stories.
+- **Architecture Decision Records (ADRs)**:
+  - [ADR 001: Argon2id Password Hashing](file:///c:/Users/USER/Desktop/Mini%20SSO/docs/decisions/001-argon2id-password-hashing.md)
+  - [ADR 002: Mandatory PKCE S256 for Public Clients](file:///c:/Users/USER/Desktop/Mini%20SSO/docs/decisions/002-mandatory-pkce-s256.md)
+  - [ADR 003: Tamper-Evident Audit Log via SHA-256 Hash Chaining](file:///c:/Users/USER/Desktop/Mini%20SSO/docs/decisions/003-tamper-evident-hash-chain.md)
+  - [ADR 004: First-Principles RFC 6238 TOTP Implementation](file:///c:/Users/USER/Desktop/Mini%20SSO/docs/decisions/004-first-principles-totp.md)
+  - [ADR 005: Asymmetric RS256 JWTs and JWKS Key Rotation](file:///c:/Users/USER/Desktop/Mini%20SSO/docs/decisions/005-asymmetric-rs256-and-jwks.md)
 
 ---
 
